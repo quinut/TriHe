@@ -16,7 +16,7 @@
 // 변수 선언
 
 int initialDelay = 1000;
-int delayTime = 1000;
+int delayTime = 100;
 
 
 float accelX, accelY, accelZ;
@@ -25,6 +25,29 @@ float temperature;
 
 
 long US_duration, US_distance;
+
+// PID
+struct PIDState {
+  float prevError;
+  float integral;
+};
+
+struct controllerData {
+  int s1_X;
+  int s1_Y;
+  float s2_rad;
+  float s2_distance;
+  bool switchState;
+};
+
+
+enum dataname{
+  ctrl_height,
+  ctrl_yaw,
+  ctrl_angle,
+  ctrl_distance
+};
+
 
 
 // 핀 선언
@@ -66,8 +89,6 @@ float BLDC_2_THROTTLE = 0;
 float BLDC_3_THROTTLE = 0;
 float default_THROTTLE = 0; // 기본 스로틀값
 
-MPU6050 mpu; // MPU6050 - 자이로센서
-
 bool dmpReady = false;
 uint8_t mpuIntStatus;
 uint8_t devStatus;
@@ -90,169 +111,45 @@ PIDState yawPID = {0, 0}; // Yaw 제어용
 PIDState distancePID = {0, 0}; // 거리 제어용
 
 
-void setup() {
-
-  default_THROTTLE = 0;
-  BLDC1.write(1000);
-  BLDC2.write(1000);
-  BLDC3.write(1000);
-
-  Serial.begin(115200);
-  Wire.begin();
-  
-  dmpInit();
-  
-
-  // NRF24L01
-  radio.begin();
-  radio.setPALevel(RF24_PA_MIN);
-  radio.openReadingPipe(1, pipe);
-  radio.startListening();
-  Serial.println("라디오 통신 시작");
-
-
-  // MPU6050
-
-
-  // SRO4M-2
-  pinMode(US_ECHO, OUTPUT);
-  pinMode(US_TRIG, INPUT);
-
-  // BLDC
-  BLDC1.attach(BLDC_1);
-  BLDC2.attach(BLDC_2);
-  BLDC3.attach(BLDC_3);
-
-  delay(initialDelay);
-}
+// 함수
 
 void dmpInit() {
   mpu.initialize();
 
-    Serial.println(F("Testing device connections..."));
-    Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+  Serial.println(F("Testing device connections..."));
+  Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
 
-    Serial.println(F("Initializing DMP..."));
-    devStatus = mpu.dmpInitialize();
+  Serial.println(F("Initializing DMP..."));
+  devStatus = mpu.dmpInitialize();
 
-    mpu.setXGyroOffset(0);
-    mpu.setYGyroOffset(0);
-    mpu.setZGyroOffset(0);
-    mpu.setZAccelOffset(0);
+  mpu.setXGyroOffset(0);
+  mpu.setYGyroOffset(0);
+  mpu.setZGyroOffset(0);
+  mpu.setZAccelOffset(0);
 
-    if (devStatus == 0) {
-        Serial.println(F("Enabling DMP..."));
-        mpu.setDMPEnabled(true);
+  if (devStatus == 0) {
+      Serial.println(F("Enabling DMP..."));
+      mpu.setDMPEnabled(true);
 
-        dmpReady = true;
-        packetSize = mpu.dmpGetFIFOPacketSize();
-    } else {
-        Serial.print(F("DMP Initialization failed (code "));
-        Serial.print(devStatus);
-        Serial.println(F(")"));
-    }
-}
-
-
-void loop() {
-
-  // NRF24L01
-  float height_ctrl = getRadioData(ctrl_height);
-  float yaw_ctrl = getRadioData(ctrl_yaw);
-  float angle_ctrl = getRadioData(ctrl_angle);
-  float distance_ctrl = getRadioData(ctrl_distance);
- 
-  float yaw_last = yaw_rad; // 이전 yaw값
-
-  // MPU6050
-  getGyro();
-
-  float yaw_current = yaw_rad;
-
-
-  // SRO4M-2
-  getDistance();
-
-  // 가상 yaw (LStick X)
-  float yaw_ctrl_weight = 0.5; // yaw 컨트롤러 가중치
-  vir_front = vir_front + angle_ctrl * yaw_ctrl_weight;
-
-
-  if (height_ctrl > 30) {
-    targetHeight += 1; // 상승
-  } else if (height_ctrl < -30) {
-    targetHeight -= 1; // 하강
+      dmpReady = true;
+      packetSize = mpu.dmpGetFIFOPacketSize();
+  } else {
+      Serial.print(F("DMP Initialization failed (code "));
+      Serial.print(devStatus);
+      Serial.println(F(")"));
   }
-
-  float heightOutput = computePID(
-    targetHeight, US_distance,
-    2.0, 0.5, 1.0, // Kp, Ki, Kd
-    heightPID,
-    delayTime / 1000.0, // millis() 로 바꿔서 따로 루프 돌려야 할 듯
-    0, 255
-  );
-
-  default_THROTTLE = heightOutput;
-
-
-  float yaw_differ = yaw_current - yaw_last;
-  if (yaw_differ < 0) {
-    yaw_differ = yaw_differ + 360;
-  } else if (yaw_differ > 360) {
-    yaw_differ = yaw_differ - 360;
-  }
-  vir_front = vir_front + yaw_differ; // 회전각도 업데이트
-
-  BLDC_1_THROTTLE = default_THROTTLE - distance_ctrl * cos( angle_ctrl - radians( 0 + vir_front) );
-  BLDC_2_THROTTLE = default_THROTTLE - distance_ctrl * cos( angle_ctrl - radians( 120 + vir_front) );
-  BLDC_3_THROTTLE = default_THROTTLE - distance_ctrl * cos( angle_ctrl - radians( 240 + vir_front) ); // 각도별 가중치
-
-
-  // 모터 출력
-  BLDC1.write(BLDC_1_THROTTLE);
-  BLDC2.write(BLDC_2_THROTTLE);
-  BLDC3.write(BLDC_3_THROTTLE);
-
-
-  delay(delayTime);
 }
-
-
 
 // NRF24L01 - 데이터 수신
-enum dataname{
-  ctrl_height,
-  ctrl_yaw,
-  ctrl_angle,
-  ctrl_distance
-};
-float getRadioData(enum dataname name){
+controllerData getRadioData() {
+  controllerData data; // 기본값(0)으로 초기화
   if (radio.available()) {
-    float data[4] = {0};
     radio.read(&data, sizeof(data));
-    switch (name) {
-      case ctrl_height:
-        return data[0];
-        break;
-      case ctrl_yaw:
-        return data[1];
-        break;
-      case ctrl_angle:
-        return data[2];
-        break;
-      case ctrl_distance:
-        return data[3];
-        break;
-    }
-    return data[0];
-    // Serial.print("Received: ");
-    // for (int i = 0; i < 4; i++) {
-    //   Serial.print(data[i]);
-    //   Serial.print(" ");
-    // }
-    // Serial.println();
   }
+  return data;
 }
+
+
 
 // MPU6050 - 자이로 데이터를 변수에 저장
 void getGyro(){
@@ -282,11 +179,6 @@ void getDistance(){
   US_distance = US_duration * 17 / delayTime;
 }
 
-// PID
-struct PIDState {
-  float prevError;
-  float integral;
-};
 
 float computePID(
   float setpoint,         // 목표값
@@ -307,3 +199,120 @@ float computePID(
   if (output < outputMin) output = outputMin;
   return output;
 }
+
+
+void setup() {
+
+  BLDC1.attach(BLDC_1);
+  BLDC2.attach(BLDC_2);
+  BLDC3.attach(BLDC_3);
+
+  default_THROTTLE = 0;
+  BLDC1.write(1000);
+  BLDC2.write(1000);
+  BLDC3.write(1000);
+
+  Serial.begin(115200);
+  Wire.begin();
+  
+  dmpInit();
+  
+
+  // NRF24L01
+  radio.begin();
+  radio.setPALevel(RF24_PA_LOW);
+  radio.openReadingPipe(0, pipe);
+  radio.startListening();
+  Serial.println("라디오 통신 시작");
+
+
+  // SRO4M-2
+  pinMode(US_ECHO, OUTPUT);
+  pinMode(US_TRIG, INPUT);
+
+  // BLDC
+
+
+  delay(initialDelay);
+}
+
+
+
+
+void loop() {
+
+  // NRF24L01
+  float height_ctrl = getRadioData().s1_Y;
+  float yaw_ctrl = getRadioData().s1_X;
+  float angle_ctrl = getRadioData().s2_rad;
+  float distance_ctrl = getRadioData().s2_distance;
+
+  Serial.print("height_ctrl: ");
+  Serial.println(height_ctrl);
+  Serial.print("yaw_ctrl: ");
+  Serial.println(yaw_ctrl);
+  Serial.print("angle_ctrl: ");
+  Serial.println(angle_ctrl);
+  Serial.print("distance_ctrl: ");
+  Serial.println(distance_ctrl);
+  // Serial.print("US_distance: ");
+  // Serial.println(US_distance);
+ 
+ 
+  float yaw_last = yaw_rad; // 이전 yaw값
+
+  // MPU6050
+  getGyro();
+
+  float yaw_current = yaw_rad;
+
+
+  // SRO4M-2
+  getDistance();
+
+  // 가상 yaw (LStick X)
+  float yaw_ctrl_weight = 0.5; // yaw 컨트롤러 가중치
+  vir_front = vir_front + angle_ctrl * yaw_ctrl_weight;
+
+
+  if (height_ctrl > 30) {
+    targetHeight += 1; // 상승
+  } else if (height_ctrl < -30) {
+    targetHeight -= 1; // 하강
+  }
+
+
+  default_THROTTLE = computePID(
+    targetHeight, US_distance,
+    2.0, 0.5, 1.0, // Kp, Ki, Kd
+    heightPID,
+    delayTime / 1000.0, // millis() 로 바꿔서 따로 루프 돌려야 할 듯
+    0, 255
+  );
+
+
+  float yaw_differ = yaw_current - yaw_last;
+  if (yaw_differ < 0) {
+    yaw_differ = yaw_differ + 360;
+  } else if (yaw_differ > 360) {
+    yaw_differ = yaw_differ - 360;
+  }
+  vir_front = vir_front + yaw_differ; // 회전각도 업데이트
+
+  BLDC_1_THROTTLE = default_THROTTLE - distance_ctrl * cos( angle_ctrl - radians( 0 + vir_front) );
+  BLDC_2_THROTTLE = default_THROTTLE - distance_ctrl * cos( angle_ctrl - radians( 120 + vir_front) );
+  BLDC_3_THROTTLE = default_THROTTLE - distance_ctrl * cos( angle_ctrl - radians( 240 + vir_front) ); // 각도별 가중치
+
+
+  // 모터 출력
+  BLDC1.write(BLDC_1_THROTTLE);
+  BLDC2.write(BLDC_2_THROTTLE);
+  BLDC3.write(BLDC_3_THROTTLE);
+
+
+  delay(delayTime);
+}
+
+
+
+
